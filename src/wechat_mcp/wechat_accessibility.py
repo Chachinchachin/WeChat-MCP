@@ -386,11 +386,15 @@ def open_chat_for_contact(chat_name: str) -> dict[str, Any] | None:
 def get_search_list(ax_app):
     """
     Return the AX list that contains global search results in the
-    left sidebar (identifier: 'search_list').
+    left sidebar.
     """
 
     def is_search_list(el, role, title, identifier):
-        return role == kAXListRole and identifier == "search_list"
+        if role != kAXListRole:
+            return False
+        # WeChat < 4.0.6 used identifier="search_list".
+        # WeChat 4.0.6+ uses title="Chats".
+        return identifier == "search_list" or title == "Chats"
 
     search_list = dfs(ax_app, is_search_list)
     if search_list is None:
@@ -482,6 +486,7 @@ def _find_exact_match_in_entries(entries: list[SearchEntry], contact_name: str):
     Preference order:
     - Exact match under "Contacts"
     - Exact match under "Group Chats"
+    - If no section headers found (WeChat 4.0.6+), match any entry
 
     Entries classified as "Chat History", "Official Accounts", "Internet search results", or "More" are ignored.
     """
@@ -490,9 +495,15 @@ def _find_exact_match_in_entries(entries: list[SearchEntry], contact_name: str):
 
     contact_element = None
     group_element = None
+    any_element = None
 
     for entry in entries:
         if entry.text != target:
+            continue
+        if not headers:
+            # No section headers (WeChat 4.0.6+): accept first exact match.
+            if any_element is None:
+                any_element = entry.element
             continue
         section = _classify_section(entry, headers)
         if section == "Contacts" and contact_element is None:
@@ -504,7 +515,7 @@ def _find_exact_match_in_entries(entries: list[SearchEntry], contact_name: str):
         return contact_element
     if group_element is not None:
         return group_element
-    return None
+    return any_element
 
 
 def _summarize_search_candidates(
@@ -522,17 +533,21 @@ def _summarize_search_candidates(
     headers = _build_section_headers(entries)
     contacts: list[str] = []
     group_chats: list[str] = []
+    unsectioned: list[str] = []
+
+    _skip = {
+        "Contacts", "Group Chats", "Chat History",
+        "Official Accounts", "Internet search results", "More",
+    }
 
     for entry in entries:
-        # Skip section headers themselves.
-        if entry.text in (
-            "Contacts",
-            "Group Chats",
-            "Chat History",
-            "Official Accounts",
-            "Internet search results",
-            "More",
-        ):
+        if entry.text in _skip:
+            continue
+
+        if not headers:
+            # No section headers (WeChat 4.0.6+): collect all as unsectioned.
+            if entry.text not in unsectioned:
+                unsectioned.append(entry.text)
             continue
 
         section = _classify_section(entry, headers)
@@ -544,7 +559,7 @@ def _summarize_search_candidates(
                 group_chats.append(entry.text)
 
     return {
-        "contacts": contacts[:15],
+        "contacts": (contacts or unsectioned)[:15],
         "group_chats": group_chats[:15],
     }
 

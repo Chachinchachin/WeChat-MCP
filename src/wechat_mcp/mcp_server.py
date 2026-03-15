@@ -46,15 +46,14 @@ def fetch_messages_by_chat(
         if not same_chat:
             open_result = open_chat_for_contact(chat_name)
             if isinstance(open_result, dict) and open_result.get("error"):
-                # No exact match; surface candidates instead of forcing a chat.
+                # Search didn't find an exact match, but may have navigated
+                # to the right chat anyway (WeChat 4.0.6+ changed AX
+                # identifiers). Try fetching messages before giving up.
                 logger.info(
                     "open_chat_for_contact returned candidates for chat=%s; "
-                    "skipping message fetch",
+                    "attempting to fetch messages anyway",
                     chat_name,
                 )
-                enriched = dict(open_result)
-                enriched.setdefault("tool", "fetch_messages_by_chat")
-                return [enriched]
 
         messages: list[ChatMessage] = fetch_recent_messages(last_n=last_n)
         result = [msg.to_dict() for msg in messages]
@@ -109,18 +108,9 @@ def reply_to_messages_by_chat(
             if isinstance(open_result, dict) and open_result.get("error"):
                 logger.info(
                     "open_chat_for_contact returned candidates for chat=%s; "
-                    "skipping reply send",
+                    "attempting to send reply anyway",
                     chat_name,
                 )
-                enriched: dict[str, Any] = {
-                    "error": open_result.get("error"),
-                    "chat_name": chat_name,
-                    "candidates": open_result.get("candidates", {}),
-                    "reply_message": reply_message,
-                    "sent": False,
-                    "tool": "reply_to_messages_by_chat",
-                }
-                return enriched
 
         sent = False
         if reply_message is not None and reply_message.strip():
