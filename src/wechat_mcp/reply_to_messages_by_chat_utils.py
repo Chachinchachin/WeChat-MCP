@@ -34,20 +34,37 @@ def press_return() -> None:
     CGEventPost(kCGHIDEventTap, event_up)
 
 
-def find_input_field(ax_app: Any):
+def find_input_field(ax_app: Any, retries: int = 5, delay: float = 0.5):
     """
     Locate the chat input text area in the current WeChat window.
+
+    Retries several times with a delay to allow the AX tree to settle
+    after WeChat is activated.
     """
 
     def is_input(el, role, title, identifier):
-        return role == kAXTextAreaRole and identifier == "chat_input_field"
+        if role != kAXTextAreaRole:
+            return False
+        # WeChat 4.0.6+: identifier may be None, match by excluding
+        # the search field (title="Search").
+        if identifier == "chat_input_field":
+            return True
+        if title and title != "Search":
+            return True
+        return False
 
-    input_field = dfs(ax_app, is_input)
-    if input_field is None:
-        raise RuntimeError(
-            "Could not find WeChat chat input field via Accessibility API"
+    for attempt in range(retries):
+        input_field = dfs(ax_app, is_input)
+        if input_field is not None:
+            return input_field
+        logger.info(
+            "Input field not found, retrying (%d/%d)...", attempt + 1, retries
         )
-    return input_field
+        time.sleep(delay)
+
+    raise RuntimeError(
+        "Could not find WeChat chat input field via Accessibility API"
+    )
 
 
 def send_message(text: str) -> None:

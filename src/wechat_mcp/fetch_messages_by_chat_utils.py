@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
@@ -66,13 +67,17 @@ def scroll_to_bottom(msg_list: Any, center: tuple[float, float]) -> None:
     sending large negative scroll events until the last visible message
     stabilizes.
     """
-    last_text: str | None = None
+    logger.info("Scrolling to bottom of chat history")
+    last_texts: list[str] | None = None
     stable = 0
 
-    for _ in range(40):
-        # Negative delta moves towards newer messages (bottom of history).
-        post_scroll(center, -1000)
-        time.sleep(0.05)
+    for attempt in range(60):
+        # Use moderate scroll steps to avoid macOS rubber-band bouncing.
+        # Multiple small scrolls are more reliable than one huge one.
+        for _ in range(3):
+            post_scroll(center, -200)
+            time.sleep(0.05)
+        time.sleep(0.25)
 
         children = ax_get(msg_list, kAXChildrenAttribute) or []
         texts: list[str] = []
@@ -83,16 +88,22 @@ def scroll_to_bottom(msg_list: Any, center: tuple[float, float]) -> None:
         if not texts:
             continue
 
-        new_last = texts[-1]
-        if new_last == last_text:
+        # Compare the last few visible texts to detect stabilization,
+        # not just the final one — a single repeated message like "Skip"
+        # can cause false positives.
+        snapshot = texts[-3:] if len(texts) >= 3 else texts
+        if snapshot == last_texts:
             stable += 1
             if stable >= 3:
+                logger.info(
+                    "Reached bottom of chat after %d scroll(s)", attempt + 1
+                )
                 break
         else:
-            last_text = new_last
+            last_texts = snapshot
             stable = 0
 
-    time.sleep(0.2)
+    time.sleep(0.3)
 
 
 def scroll_up_small(center: tuple[float, float]) -> None:
@@ -101,7 +112,7 @@ def scroll_up_small(center: tuple[float, float]) -> None:
     """
     # Positive delta scrolls towards older messages.
     post_scroll(center, 50)
-    time.sleep(0.1)
+    time.sleep(0.15)
 
 
 def count_colored_pixels(
@@ -184,6 +195,21 @@ def classify_sender_for_message(
     return "UNKNOWN"
 
 
+_TIMESTAMP_RE = re.compile(
+    r"^\d{1,2}:\d{2}$"                            # "9:41", "17:30"
+    r"|^\d{1,2}[/-]\d{1,2}$"                      # "3/14", "3-14"
+    r"|^\d{1,2}[/-]\d{1,2}\s+\d{1,2}:\d{2}$"     # "2/7 22:13", "3-14 9:41"
+    r"|^Yesterday\s+\d{1,2}:\d{2}$"               # "Yesterday 9:41"
+    r"|^\d{4}[/-]\d{1,2}[/-]\d{1,2}$"             # "2026/3/14", "2025-11-23"
+    r"|^\d{4}[/-]\d{1,2}[/-]\d{1,2}\s+\d{1,2}:\d{2}$"  # "2025-11-23 03:33"
+)
+
+
+def _is_timestamp(text: str) -> bool:
+    """Return True if the text looks like a WeChat timestamp label."""
+    return bool(_TIMESTAMP_RE.match(text.strip()))
+
+
 @dataclass
 class ChatMessage:
     sender: SenderLabel
@@ -191,6 +217,21 @@ class ChatMessage:
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
+
+
+def _find_anchor_sequence(
+    visible: list[ChatMessage],
+    anchor: list[str],
+) -> int | None:
+    """
+    Find the start index in *visible* where the sequence of texts
+    matches *anchor*.  Returns None if no match is found.
+    """
+    anchor_len = len(anchor)
+    for i in range(len(visible) - anchor_len + 1):
+        if all(visible[i + j].text == anchor[j] for j in range(anchor_len)):
+            return i
+    return None
 
 
 def fetch_recent_messages(
@@ -208,8 +249,9 @@ def fetch_recent_messages(
     - Classifies each message as ME/OTHER/UNKNOWN using the same
       screenshot-based heuristic as before.
     - Merges newly revealed older messages at the front of the list by
-      aligning on the oldest already-known message text.
+      aligning on a sequence of the oldest already-known messages.
     """
+    logger.info("Fetching recent messages (last_n=%d, max_scrolls=%s)", last_n, max_scrolls)
     ax_app = get_wechat_ax_app()
     msg_list = get_messages_list(ax_app)
     center = get_list_center(msg_list)
@@ -229,6 +271,9 @@ def fetch_recent_messages(
             text = ax_get(child, kAXValueAttribute) or ax_get(child, kAXTitleAttribute)
             if not text:
                 continue
+            text_str = str(text).strip()
+            if not text_str or _is_timestamp(text_str):
+                continue
 
             pos_ref = ax_get(child, kAXPositionAttribute)
             size_ref = ax_get(child, kAXSizeAttribute)
@@ -239,7 +284,7 @@ def fetch_recent_messages(
             else:
                 sender = classify_sender_for_message(image, list_origin, point, size)
 
-            visible.append(ChatMessage(sender=sender, text=str(text)))
+            visible.append(ChatMessage(sender=sender, text=text_str))
 
         if not visible:
             break
@@ -247,13 +292,11 @@ def fetch_recent_messages(
         if not messages:
             messages = visible
         else:
-            # Align on the oldest already-known message using its text as anchor.
-            anchor_text = messages[0].text
-            idx: int | None = None
-            for i, msg in enumerate(visible):
-                if msg.text == anchor_text:
-                    idx = i
-                    break
+            # Build an anchor from the first few known messages for robust
+            # matching — a single text can collide with duplicates.
+            anchor_len = min(3, len(messages))
+            anchor = [messages[i].text for i in range(anchor_len)]
+            idx = _find_anchor_sequence(visible, anchor)
 
             if idx is None:
                 new_older = visible
