@@ -168,20 +168,27 @@ def collect_chat_elements(ax_app) -> dict[str, Any]:
     """
     results: dict[str, Any] = {}
 
+    seen_identifiers: list[str] = []
+
     def walk(element):
         role = ax_get(element, kAXRoleAttribute)
         identifier = ax_get(element, kAXIdentifierAttribute)
         if isinstance(role, str) and role == kAXStaticTextRole:
-            if isinstance(identifier, str) and identifier.startswith("session_item_"):
-                chat_name = identifier[len("session_item_") :]
-                if chat_name:
-                    results[chat_name] = element
+            if isinstance(identifier, str):
+                if identifier.startswith("session_item_"):
+                    chat_name = identifier[len("session_item_") :]
+                    if chat_name:
+                        results[chat_name] = element
+                elif len(seen_identifiers) < 20:
+                    seen_identifiers.append(identifier)
 
         children = ax_get(element, kAXChildrenAttribute) or []
         for child in children:
             walk(child)
 
     walk(ax_app)
+    if not results and seen_identifiers:
+        logger.info("No session_item_ identifiers found. Sample AXStaticText identifiers: %s", seen_identifiers[:10])
     logger.info("Collected %d chat elements from session list", len(results))
     return results
 
@@ -365,9 +372,10 @@ def open_chat_for_contact(chat_name: str) -> dict[str, Any] | None:
         )
         logger.warning(
             "open_chat_for_contact(%s) returning candidates instead of "
-            "opening a chat: %s",
+            "opening a chat: %s  candidates=%s",
             chat_name,
             error_msg,
+            candidates,
         )
         return {
             "error": error_msg,
@@ -393,8 +401,22 @@ def get_search_list(ax_app):
         if role != kAXListRole:
             return False
         # WeChat < 4.0.6 used identifier="search_list".
-        # WeChat 4.0.6+ uses title="Chats".
-        return identifier == "search_list" or title == "Chats"
+        if identifier == "search_list":
+            return True
+        # WeChat 4.0.6+: search dropdown is an untitled AXList whose
+        # children include section headers like "Contacts" / "Group Chats".
+        # Distinguish from the main chat list (title="Chats") by checking
+        # that this list has NO title and NO identifier.
+        if (not title or title == "None") and (not identifier or identifier == "None"):
+            # Quick check: does it contain a "Contacts" or "Group Chats" text child?
+            children = ax_get(el, kAXChildrenAttribute) or []
+            for child in children[:20]:
+                child_title = ax_get(child, kAXTitleAttribute)
+                child_value = ax_get(child, kAXValueAttribute)
+                t = child_title if isinstance(child_title, str) else child_value
+                if isinstance(t, str) and t.strip() in ("Contacts", "Group Chats", "Chat History"):
+                    return True
+        return False
 
     search_list = dfs(ax_app, is_search_list)
     if search_list is None:
